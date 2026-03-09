@@ -29,8 +29,16 @@ Before starting, ensure your system has:
 ```bash
 # Install dependencies
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl git unzip xz-utils zip libglu1-mesa clang cmake ninja-build \
-libgtk-3-dev liblzma-dev pkg-config
+# Dependencies lengkap untuk Flutter Linux
+sudo apt install -y curl git unzip xz-utils zip \
+    clang cmake ninja-build pkg-config \
+    libgtk-3-0 libgtk-3-dev \
+    libmpv-dev libepoxy-dev libasound2-dev \
+    llvm-18 lld-18 binutils
+
+# Buat symbolic link jika diperlukan
+sudo ln -s /usr/bin/ld /usr/lib/llvm-18/bin/ld 2>/dev/null || true
+sudo ln -s /usr/bin/lld-18 /usr/lib/llvm-18/bin/lld.lld 2>/dev/null || true
 
 # Download Flutter SDK
 cd ~

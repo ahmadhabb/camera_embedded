@@ -6,4 +6,4 @@ echo "=== Running Camera App ==="
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd):$(pwd)/linux
 
 # Run
-flutter run -d linux
+flutter run -d linux --release

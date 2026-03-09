@@ -1,3 +1,0 @@
-/home/farchan/Flutter/camera_embedded/linux/cpp/build/CMakeFiles/camera_driver.dir
-/home/farchan/Flutter/camera_embedded/linux/cpp/build/CMakeFiles/edit_cache.dir
-/home/farchan/Flutter/camera_embedded/linux/cpp/build/CMakeFiles/rebuild_cache.dir

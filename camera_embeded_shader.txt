@@ -1,0 +1,73 @@
+1. Install Library Sistem (Wajib)
+media_kit memerlukan libmpv untuk merender video. Jalankan perintah ini di terminal sesuai distro Anda:
+
+Ubuntu / Debian / Mint:
+
+Bash
+sudo apt update
+sudo apt install -y libmpv-dev mpv libass-dev libva-dev libvdpau-dev
+Fedora:
+
+Bash
+sudo dnf install mpv-devel
+Arch Linux:
+
+Bash
+sudo pacman -S mpv
+2. Struktur Proyek
+Pastikan folder proyek Anda mengikuti struktur ini:
+
+Plaintext
+moil_app/
+├── assets/
+│   └── shaders/
+│       └── anypoint.frag
+├── lib/
+│   └── main.dart
+└── pubspec.yaml
+3. Isi File pubspec.yaml
+Gunakan konfigurasi ini agar Shaders dan Library terbaca oleh sistem:
+
+YAML
+name: moil_shader_app
+description: Fisheye dewarping with shaders.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.1.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  media_kit: ^1.1.0
+  media_kit_video: ^1.1.0
+  flutter_shaders: ^0.1.0
+  file_picker: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
+  
+  # BAGIAN SANGAT PENTING
+  assets:
+    - assets/shaders/
+    
+  shaders:
+    - assets/shaders/anypoint.frag
+4. Perintah Terminal untuk Menjalankan
+Gunakan urutan perintah ini di dalam folder proyek Anda:
+
+Bash
+# 1. Ambil paket library
+flutter pub get
+
+# 2. Pastikan file shader sudah ada di tempatnya
+mkdir -p assets/shaders
+
+# 3. Jalankan aplikasi dalam mode release (untuk performa GPU maksimal)
+flutter run -d linux --release
