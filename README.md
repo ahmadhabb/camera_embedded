@@ -1,196 +1,270 @@
-# Embedded Camera App with Flutter + C++ + OpenCV
+# camera_embedded
 
-An embedded camera controller application built with Flutter for the UI and C++ with OpenCV for the camera backend processing. This app provides real-time camera control (open, pause, resume, stop) with FPS display and status indicators.
+Aplikasi Flutter Linux untuk menampilkan feed kamera fisheye dengan koreksi proyeksi **MOIL (Mapping of Omni-directional Image with Less distortion)** secara real-time menggunakan GLSL fragment shader.
 
-## 📱 Features
+---
 
-- **Live Camera Preview** - Real-time camera stream display
-- **Open Camera** - Open and activate the camera
-- **Pause/Resume Camera** - Pause and resume the video stream
-- **Stop Camera** - Completely stop the camera
-- **FPS Counter** - Real-time frame rate display
-- **Status Indicator** - Camera status (LIVE/PAUSED/STOPPED)
-- **Resolution Info** - Display current video resolution
+## Fitur
 
-## 🛠️ Prerequisites
+- 🎥 **Live Camera** via GStreamer (V4L2, MJPEG, 1920×1080 @ 30fps)
+- 🎬 **Video File** playback via media_kit (MP4, MKV, dll)
+- 🌐 **Shader MOIL** — Anypoint M1, Anypoint M2, Panorama Car, Panorama Tube
+- 🖱️ Kontrol interaktif: drag pan (alpha/beta), scroll zoom, double-tap reset
+- 📊 Performance overlay: FPS, frame time, memory, resolusi
 
-Before starting, ensure your system has:
+---
 
-- **Ubuntu 20.04+** or Debian-based Linux distribution
-- **Flutter SDK** (≥ 3.0.0)
-- **CMake** (≥ 3.28.3) - Install via snap
-- **OpenCV** (≥ 4.6.0)
-- **Camera** (built-in or external USB)
+## Prasyarat Sistem
 
-## 🚀 Complete Installation from Scratch
+| Kebutuhan | Versi minimal |
+|---|---|
+| OS | Ubuntu 22.04 / 24.04 (Linux x86_64) |
+| Flutter | 3.19+ |
+| Dart | 3.3+ |
+| CMake | 3.14+ |
+| GCC / G++ | 11+ |
+| GStreamer | 1.20+ |
 
-### 1. Install Flutter SDK
+---
+
+## 1. Install Flutter
 
 ```bash
-# Install dependencies
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl git unzip xz-utils zip libglu1-mesa clang cmake ninja-build \
-libgtk-3-dev liblzma-dev pkg-config
+# Install dependensi sistem Flutter
+sudo apt update
+sudo apt install -y curl git unzip xz-utils zip libglu1-mesa
 
 # Download Flutter SDK
 cd ~
 git clone https://github.com/flutter/flutter.git -b stable
+
+# Tambahkan ke PATH (tambahkan ke ~/.bashrc atau ~/.zshrc)
 echo 'export PATH="$PATH:$HOME/flutter/bin"' >> ~/.bashrc
 source ~/.bashrc
 
-# Verify installation
+# Verifikasi
 flutter doctor
 ```
 
-### 2. Install Latest CMake
+> Pastikan `flutter doctor` tidak menampilkan error untuk Linux toolchain.
+
+---
+
+## 2. Install Dependensi Sistem
 
 ```bash
-# Remove old CMake if exists
-sudo apt remove --purge cmake cmake-data
-
-# Install via snap
-sudo snap install cmake --classic
-
-# Create symlink
-sudo ln -sf /snap/bin/cmake /usr/local/bin/cmake
-
-# Update PATH
-export PATH=/usr/local/bin:$PATH
-echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc
-source ~/.bashrc
-
-# Verify
-cmake --version  # Should be ≥ 3.28.x
+sudo apt install -y \
+  cmake \
+  ninja-build \
+  pkg-config \
+  libgtk-3-dev \
+  libblkid-dev \
+  liblzma-dev \
+  # GStreamer core & plugins
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-libav \
+  # V4L2 tools (opsional, untuk debug kamera)
+  v4l-utils
 ```
 
-### 3. Install OpenCV
+---
+
+## 3. Clone / Setup Project
 
 ```bash
-# Install OpenCV and dependencies
-sudo apt update
-sudo apt install -y libopencv-dev libopencv-core-dev libopencv-videoio-dev \
-libopencv-imgproc-dev libopencv-highgui-dev build-essential
-
-# Verify
-pkg-config --modversion opencv4  # Should be 4.6.0 or higher
-```
-
-### 4. Clone Repository
-
-```bash
-# Clone your repo (replace URL with your repository)
-git clone https://github.com/username/camera_embedded.git
+git clone <url-repo-anda> camera_embedded
 cd camera_embedded
 ```
 
-### 5. Build and Run the Application
-
-```bash
-# Make the run script executable
-chmod +x run_clean.sh
-
-# Run the application
-./run_clean.sh
-```
-
-## 📁 Project Structure
+Struktur folder yang diharapkan:
 
 ```
 camera_embedded/
 ├── lib/
-│   └── main.dart                 # Flutter UI and FFI bindings
-├── linux/
-│   ├── CMakeLists.txt            # Main build configuration
-│   ├── cpp/
-│   │   ├── CMakeLists.txt        # C++/OpenCV build configuration
-│   │   ├── camera_driver.h       # C++ header
-│   │   └── camera_driver.cpp     # OpenCV implementation
-│   └── runner/
-│       └── CMakeLists.txt        # Runner build configuration
-├── pubspec.yaml                   # Flutter dependencies
-└── run_clean.sh                   # Script to run the app
+│   └── main.dart
+├── shaders/
+│   └── anypoint.frag
+├── native/
+│   ├── camera_bridge.cpp
+│   └── CMakeLists.txt
+├── linux/               ← libcamera_bridge.so akan di-generate di sini
+├── pubspec.yaml
+└── README.md
 ```
 
-## 🎯 How to Use
+---
 
-1. **Run the application**:
-   ```bash
-   ./run_clean.sh
-   ```
+## 4. Build Native Library (GStreamer Bridge)
 
-2. **Camera controls**:
-   - **Open** - Open camera and start streaming
-   - **Pause** - Pause the stream (last frame remains)
-   - **Resume** - Resume paused stream
-   - **Stop** - Completely stop the camera
+Library C++ ini menghubungkan GStreamer dengan Flutter via FFI.
 
-3. **Status indicators**:
-   - **Green (LIVE)** - Camera active and streaming
-   - **Orange (PAUSED)** - Camera paused
-   - **Red (STOPPED)** - Camera inactive
-
-4. **Additional information**:
-   - **FPS counter** - Real-time frame rate in top-right corner
-   - **Resolution** - Video resolution in bottom-left corner
-
-## 🔧 Troubleshooting
-
-### Camera not detected
 ```bash
-# Check camera devices
-ls -la /dev/video*
-v4l2-ctl --list-devices
+# Dari root project
+cmake -B native/build -S native
 
-# Add user to video group
-sudo usermod -a -G video $USER
-# Logout/login or run: newgrp video
+cmake --build native/build
+
+# Verifikasi — harus muncul file .so
+ls -lh linux/libcamera_bridge.so
 ```
 
-### OpenCV library not found
-```bash
-# Check OpenCV installation
-pkg-config --libs --cflags opencv4
-
-# Reinstall if necessary
-sudo apt install --reinstall libopencv-dev
+Output yang diharapkan:
+```
+-rwxrwxr-x 1 user user 18K ... linux/libcamera_bridge.so
 ```
 
-### Error "CMake 3.28.3 or higher is required"
+> **Rebuild diperlukan** setiap kali `camera_bridge.cpp` diubah.
+
+---
+
+## 5. Install Flutter Packages
+
 ```bash
-# Install CMake via snap
-sudo snap install cmake --classic
-sudo ln -sf /snap/bin/cmake /usr/local/bin/cmake
-export PATH=/usr/local/bin:$PATH
-source ~/.bashrc
+flutter pub get
 ```
 
-### Library loading error
+Pastikan `pubspec.yaml` memiliki dependencies berikut:
+
+```yaml
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.0
+  file_picker: ^8.0.0
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.4
+  flutter_shaders: ^0.1.3
+
+flutter:
+  shaders:
+    - shaders/anypoint.frag
+```
+
+---
+
+## 6. Jalankan Aplikasi
+
 ```bash
-# Check library and dependencies
-ldd libcamera_driver.so
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
+# Development mode
 flutter run -d linux
+
+# Release mode (performa lebih baik)
+flutter run -d linux --release
 ```
 
-## 📦 Dependencies
+Jika GStreamer tidak menemukan plugin saat runtime:
 
-- **Flutter SDK** - UI framework
-- **OpenCV** - Camera processing and capture
-- **CMake** - Build system
-- **dart:ffi** - Foreign Function Interface for Flutter-C++ communication
+```bash
+GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 flutter run -d linux --release
+```
 
-## 🤝 Contributing
+---
 
-Feel free to fork this repository and submit pull requests. For bugs or feature requests, please create an issue.
+## 7. Verifikasi Kamera
 
-## 📄 License
+Sebelum membuka kamera di app, pastikan kamera terbaca oleh sistem:
 
-[MIT License](LICENSE)
+```bash
+# Cek device yang tersedia
+ls /dev/video*
 
-## 🙏 Credits
+# Cek format yang didukung kamera
+v4l2-ctl --list-formats-ext -d /dev/video0
 
-Built with ❤️ using Flutter and OpenCV.
+# Test langsung dengan GStreamer (harus tampil video)
+gst-launch-1.0 v4l2src device=/dev/video0 \
+  ! image/jpeg,width=1920,height=1080,framerate=30/1 \
+  ! jpegdec ! videoconvert ! autovideosink
+```
 
-## 📞 Contact
+Jika test GStreamer berhasil tapi app gagal, pastikan user ada di group `video`:
 
-If you have any questions, please create an issue in this repository.
+```bash
+groups $USER        # cek group aktif
+sudo usermod -aG video $USER
+# logout dan login kembali agar group aktif
+```
+
+---
+
+## Kontrol Aplikasi
+
+| Aksi | Kontrol |
+|---|---|
+| Pan / ubah sudut pandang | Klik + drag |
+| Zoom in / out | Scroll mouse |
+| Reset ke posisi awal | Double-tap |
+| Buka video file | Tombol **LOAD VIDEO SOURCE** |
+| Buka kamera live | Tombol **OPEN CAMERA** |
+| Disconnect kamera | Tombol **DISCONNECT CAMERA** |
+
+---
+
+## Troubleshooting
+
+### `libcamera_bridge.so` tidak ditemukan
+```bash
+# Pastikan file ada
+ls linux/libcamera_bridge.so
+
+# Jika belum ada, build ulang
+cmake -B native/build -S native && cmake --build native/build
+```
+
+### Kamera hanya menampilkan loading
+```bash
+# Test pipeline GStreamer manual
+gst-launch-1.0 v4l2src device=/dev/video0 \
+  ! image/jpeg,width=1920,height=1080,framerate=30/1 \
+  ! jpegdec ! videoconvert ! autovideosink
+```
+
+### Warna tidak sesuai (kulit biru)
+Sudah ditangani di shader (`anypoint.frag`) dengan swap channel R↔B karena format output kamera adalah `yuvj422p` (BGRA bukan RGBA).
+
+### FPS rendah
+- Pastikan menggunakan **release mode**: `flutter run -d linux --release`
+- Pastikan kamera support **MJPEG** (bukan YUYV) di resolusi target
+- Cek dengan: `v4l2-ctl --list-formats-ext -d /dev/video0`
+
+### Error `gst_init` saat runtime
+```bash
+# Install plugin tambahan
+sudo apt install gstreamer1.0-plugins-ugly gstreamer1.0-tools
+```
+
+---
+
+## Konfigurasi Kamera
+
+Parameter kalibrasi MOIL ada di `MoilConfig` (`lib/main.dart`).  
+Sesuaikan dengan spesifikasi kamera fisheye Anda:
+
+```dart
+static const double _sensorWidth  = 2592.0;  // resolusi asli sensor
+static const double _sensorHeight = 1944.0;
+static const double _sensorCx     = 1236.0;  // titik pusat lensa (pixels)
+static const double _sensorCy     = 950.0;
+
+// Koefisien polinomial fisheye (dari kalibrasi kamera)
+final double p2 = -34.367;
+final double p3 =  70.646;
+final double p4 =  41.608;
+final double p5 = 504.11;
+```
+
+---
+
+## Tech Stack
+
+| Komponen | Teknologi |
+|---|---|
+| UI Framework | Flutter (Linux desktop) |
+| Camera capture | GStreamer 1.0 (V4L2 → MJPEG → RGBA) |
+| Native bridge | C++17 via Dart FFI |
+| Video playback | media_kit (libmpv) |
+| Image processing | GLSL Fragment Shader (flutter_shaders) |
+| Fisheye projection | MOIL polynomial mapping |
