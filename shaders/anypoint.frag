@@ -148,6 +148,7 @@ void main() {
     if (texCoord.x < 0.0 || texCoord.x > 1.0 || texCoord.y < 0.0 || texCoord.y > 1.0) {
         fragColor = vec4(0.0, 0.0, 0.0, 1.0);
     } else {
-        fragColor = texture(uTexture, texCoord);
+        vec4 raw = texture(uTexture, texCoord);
+        fragColor = vec4(raw.b, raw.g, raw.r, raw.a);
     }
 }
