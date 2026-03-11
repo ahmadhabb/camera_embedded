@@ -27,6 +27,7 @@ migrate_working_dir/
 **/doc/api/
 **/ios/Flutter/.last_build_id
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
@@ -43,3 +44,14 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Native build artifacts
+/native/build/
+*.so
+*.a
+*.o
+*.d
+
+# Tapi tetap track libcamera_bridge.so di folder linux/ jika ingin di-commit
+# Hapus baris *.so di atas dan uncomment baris berikut jika ingin track .so:
+# !linux/libcamera_bridge.so
