@@ -9,7 +9,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:file_picker/file_picker.dart';
 
-// Video & Shader packages
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:flutter_shaders/flutter_shaders.dart';
@@ -31,7 +30,7 @@ class MoilShaderApp extends StatelessWidget {
 }
 
 // ---------------------------------------------------------
-// 1. FFI BINDINGS — libcamera_bridge.so
+// 1. FFI BINDINGS
 // ---------------------------------------------------------
 typedef _CameraInitC      = ffi.Void Function();
 typedef _CameraOpenC      = ffi.Int32 Function(ffi.Pointer<Utf8>, ffi.Int32, ffi.Int32);
@@ -75,55 +74,38 @@ class CameraBridge {
 }
 
 // ---------------------------------------------------------
-// 2. GSTREAMER CAMERA CONTROLLER
+// 2. GSTREAMER CAMERA CONTROLLER (OPTIMIZED)
 // ---------------------------------------------------------
 class GstCameraController {
-  // ✅ FIX: Resolusi disesuaikan dengan pipeline yang terbukti bekerja (640x480)
-  //         Kalau mau 1920x1080, pastikan pipeline C juga 1920x1080
   final int captureWidth;
   final int captureHeight;
 
   ffi.Pointer<ffi.Uint8>? _framePtr;
   bool _opened = false;
 
-  // ✅ Camera FPS tracking (bukan UI FPS)
-  int _frameCount = 0;
-  DateTime _fpsTimer = DateTime.now();
+  int      _frameCount   = 0;
+  DateTime _fpsTimer     = DateTime.now();
   DateTime _lastFrameTime = DateTime.now();
-  double cameraFps = 0.0;
-  double cameraFrameMs = 0.0;
+  double   cameraFps     = 0.0;
+  double   cameraFrameMs = 0.0;
 
-  GstCameraController({
-    this.captureWidth  = 1920,   // ✅ FIX: default 1920x1080, cocok dengan pipeline
-    this.captureHeight = 1080,
-  });
+  GstCameraController({this.captureWidth = 1920, this.captureHeight = 1080});
 
   Future<bool> open(String devicePath) async {
-    final bridge = CameraBridge.instance;
-    final bufSize = captureWidth * captureHeight * 4; // RGBA
-    _framePtr = malloc.allocate<ffi.Uint8>(bufSize);
-
+    _framePtr = malloc.allocate<ffi.Uint8>(captureWidth * captureHeight * 4);
     final devUtf8 = devicePath.toNativeUtf8();
-    final ok = bridge.open(devUtf8, captureWidth, captureHeight);
+    final ok = CameraBridge.instance.open(devUtf8, captureWidth, captureHeight);
     malloc.free(devUtf8);
-
-    if (ok == 0) {
-      malloc.free(_framePtr!);
-      _framePtr = null;
-      return false;
-    }
+    if (ok == 0) { malloc.free(_framePtr!); _framePtr = null; return false; }
     _opened = true;
     return true;
   }
 
   Future<ui.Image?> grabFrame() async {
     if (!_opened || _framePtr == null) return null;
+    if (CameraBridge.instance.getFrame(_framePtr!) == 0) return null;
 
-    final bridge = CameraBridge.instance;
-    final hasNew = bridge.getFrame(_framePtr!);
-    if (hasNew == 0) return null;
-
-    // ✅ Hitung FPS dari frame kamera aktual (bukan UI render)
+    // FPS tracking
     final now = DateTime.now();
     final dt = now.difference(_lastFrameTime).inMicroseconds / 1000000.0;
     if (dt > 0) cameraFrameMs = dt * 1000.0;
@@ -136,85 +118,61 @@ class GstCameraController {
       _fpsTimer = now;
     }
 
-    final bytes     = _framePtr!.asTypedList(captureWidth * captureHeight * 4);
-    final bytesCopy = Uint8List.fromList(bytes);
-
+    // ✅ OPT 1: asTypedList langsung — tidak ada double copy
+    final bytes = _framePtr!.asTypedList(captureWidth * captureHeight * 4);
     final completer = Completer<ui.Image>();
-    ui.decodeImageFromPixels(
-      bytesCopy,
-      captureWidth,
-      captureHeight,
-      ui.PixelFormat.rgba8888,
-      completer.complete,
-    );
+    ui.decodeImageFromPixels(bytes, captureWidth, captureHeight,
+        ui.PixelFormat.rgba8888, completer.complete);
     return completer.future;
   }
 
   void close() {
-    if (_opened) {
-      CameraBridge.instance.close();
-      _opened = false;
-    }
-    if (_framePtr != null) {
-      malloc.free(_framePtr!);
-      _framePtr = null;
-    }
+    if (_opened) { CameraBridge.instance.close(); _opened = false; }
+    if (_framePtr != null) { malloc.free(_framePtr!); _framePtr = null; }
   }
 
   bool get isRunning => _opened && CameraBridge.instance.isRunning() == 1;
 }
 
 // ---------------------------------------------------------
-// 3. ENGINE DATA (BENCHMARKING)
+// 3. ENGINE DATA
 // ---------------------------------------------------------
 class EngineData extends ChangeNotifier {
   double fps = 0.0;
   double frameTimeMs = 0.0;
   String memoryMB = "0";
-
   Timer? _timer;
 
   EngineData() {
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _updateSystemMetrics());
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      memoryMB = (ProcessInfo.currentRss / 1024 / 1024).toStringAsFixed(1);
+      notifyListeners();
+    });
   }
 
-  void updateFrame(double currentFps, double currentMs) {
-    fps = currentFps;
-    frameTimeMs = currentMs;
-    notifyListeners();
-  }
-
-  void _updateSystemMetrics() {
-    memoryMB = (ProcessInfo.currentRss / 1024 / 1024).toStringAsFixed(1);
-    notifyListeners();
-  }
+  void updateFrame(double f, double ms) { fps = f; frameTimeMs = ms; notifyListeners(); }
 
   @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
+  void dispose() { _timer?.cancel(); super.dispose(); }
 }
 
 // ---------------------------------------------------------
-// 4. MOIL CONFIGURATION
+// 4. MOIL CONFIG — tiap view punya parameter sendiri
 // ---------------------------------------------------------
 class MoilConfig extends ChangeNotifier {
-  double mode = 0.0;
-  double alpha = 0.0;
-  double beta = 0.0;
-  double zoom = 4.0;
+  final List<double> alphas = [0.0,  0.0,   0.0,   0.0];
+  final List<double> betas  = [0.0,  90.0,  180.0, 270.0];
+  final List<double> zooms  = [4.0,  4.0,   4.0,   4.0];
+
+  double mode     = 0.0;
   double alphaMax = 110.0;
 
   static const double _sensorWidth  = 2592.0;
   static const double _sensorHeight = 1944.0;
   static const double _sensorCx     = 1236.0;
   static const double _sensorCy     = 950.0;
-
-  // ✅ FIX: sesuaikan dengan resolusi capture aktual
   static const double _captureWidth  = 1920.0;
   static const double _captureHeight = 1080.0;
-
   static const double _scaleX = _captureWidth  / _sensorWidth;
   static const double _scaleY = _captureHeight / _sensorHeight;
 
@@ -227,15 +185,19 @@ class MoilConfig extends ChangeNotifier {
   final double p0 = 0.0, p1 = 0.0, p2 = -34.367,
                p3 = 70.646, p4 = 41.608, p5 = 504.11;
 
-  void updateControls(double a, double b, double z) {
-    alpha = a; beta = b; zoom = z;
+  void updateView(int i, double a, double b, double z) {
+    alphas[i] = a; betas[i] = b; zooms[i] = z;
     notifyListeners();
   }
 
-  void reset() {
-    alpha = 0.0; beta = 0.0; zoom = 1.0;
+  void resetView(int i) {
+    alphas[i] = 0.0;
+    betas[i]  = [0.0, 90.0, 180.0, 270.0][i];
+    zooms[i]  = 4.0;
     notifyListeners();
   }
+
+  void resetAll() { for (int i = 0; i < 4; i++) resetView(i); }
 }
 
 // ---------------------------------------------------------
@@ -245,7 +207,70 @@ enum VideoSource { none, file, camera }
 enum ViewMode { processed, original }
 
 // ---------------------------------------------------------
-// 6. CAMERA SELECTION DIALOG
+// 6. SHADER HELPER
+// ---------------------------------------------------------
+void applyMoilShader(ui.FragmentShader shader, ui.Image image,
+    Size size, Canvas canvas, MoilConfig cfg, int idx) {
+  shader.setFloat(0,  cfg.mode);
+  shader.setFloat(1,  size.width);
+  shader.setFloat(2,  size.height);
+  shader.setFloat(3,  cfg.alphas[idx]);
+  shader.setFloat(4,  cfg.betas[idx]);
+  shader.setFloat(5,  cfg.zooms[idx]);
+  shader.setFloat(6,  cfg.alphaMax);
+  shader.setFloat(7,  cfg.imageWidth);
+  shader.setFloat(8,  cfg.imageHeight);
+  shader.setFloat(9,  cfg.iCx);
+  shader.setFloat(10, cfg.iCy);
+  shader.setFloat(11, cfg.calibrationRatio);
+  shader.setFloat(12, cfg.p0);
+  shader.setFloat(13, cfg.p1);
+  shader.setFloat(14, cfg.p2);
+  shader.setFloat(15, cfg.p3);
+  shader.setFloat(16, cfg.p4);
+  shader.setFloat(17, cfg.p5);
+  shader.setImageSampler(0, image);
+  canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+}
+
+// ---------------------------------------------------------
+// 7. PAINTERS
+// ---------------------------------------------------------
+class _ImagePainter extends CustomPainter {
+  final ui.Image image;
+  _ImagePainter({required this.image});
+  @override
+  void paint(Canvas canvas, Size size) =>
+      canvas.drawImageRect(image,
+          Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+          Offset.zero & size, Paint());
+  @override
+  bool shouldRepaint(_ImagePainter old) => image != old.image;
+}
+
+class _MoilPainter extends CustomPainter {
+  final ui.Image image;
+  final ui.FragmentProgram program;
+  final MoilConfig config;
+  final int viewIndex;
+
+  _MoilPainter({required this.image, required this.program,
+      required this.config, required this.viewIndex});
+
+  @override
+  void paint(Canvas canvas, Size size) =>
+      applyMoilShader(program.fragmentShader(), image, size, canvas, config, viewIndex);
+
+  @override
+  bool shouldRepaint(_MoilPainter o) =>
+      image != o.image ||
+      config.alphas[viewIndex] != o.config.alphas[viewIndex] ||
+      config.betas[viewIndex]  != o.config.betas[viewIndex]  ||
+      config.zooms[viewIndex]  != o.config.zooms[viewIndex];
+}
+
+// ---------------------------------------------------------
+// 8. CAMERA SELECTION DIALOG
 // ---------------------------------------------------------
 class CameraSelectDialog extends StatefulWidget {
   const CameraSelectDialog({super.key});
@@ -259,10 +284,7 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
   String? _error;
 
   @override
-  void initState() {
-    super.initState();
-    _detectCameras();
-  }
+  void initState() { super.initState(); _detectCameras(); }
 
   Future<void> _detectCameras() async {
     try {
@@ -272,11 +294,10 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
         if (await File(devPath).exists()) {
           String label = 'Camera $i ($devPath)';
           try {
-            final result = await Process.run(
-                'v4l2-ctl', ['--device=$devPath', '--info'], runInShell: true);
-            final match = RegExp(r'Card type\s+:\s+(.+)')
-                .firstMatch(result.stdout.toString());
-            if (match != null) label = '${match.group(1)!.trim()} ($devPath)';
+            final r = await Process.run('v4l2-ctl',
+                ['--device=$devPath', '--info'], runInShell: true);
+            final m = RegExp(r'Card type\s+:\s+(.+)').firstMatch(r.stdout.toString());
+            if (m != null) label = '${m.group(1)!.trim()} ($devPath)';
           } catch (_) {}
           found.add(label);
         }
@@ -298,44 +319,34 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
       title: Row(children: const [
         Icon(Icons.videocam, color: Colors.cyanAccent, size: 20),
         SizedBox(width: 8),
-        Text('SELECT CAMERA', style: TextStyle(
-          color: Colors.cyanAccent, fontSize: 14,
-          fontWeight: FontWeight.bold, fontFamily: 'monospace', letterSpacing: 2,
-        )),
+        Text('SELECT CAMERA', style: TextStyle(color: Colors.cyanAccent,
+            fontSize: 14, fontWeight: FontWeight.bold,
+            fontFamily: 'monospace', letterSpacing: 2)),
       ]),
       content: SizedBox(
         width: 400,
         child: _loading
-            ? const Center(child: Padding(
-                padding: EdgeInsets.all(20),
+            ? const Center(child: Padding(padding: EdgeInsets.all(20),
                 child: CircularProgressIndicator(color: Colors.cyanAccent)))
             : _error != null
-                ? Text('Error: $_error',
-                    style: const TextStyle(color: Colors.redAccent))
+                ? Text('Error: $_error', style: const TextStyle(color: Colors.redAccent))
                 : _devices.isEmpty
                     ? Column(mainAxisSize: MainAxisSize.min, children: [
-                        const Icon(Icons.no_photography,
-                            color: Colors.white38, size: 48),
+                        const Icon(Icons.no_photography, color: Colors.white38, size: 48),
                         const SizedBox(height: 12),
-                        const Text(
-                          'Tidak ada kamera terdeteksi.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white54, fontSize: 13),
-                        ),
+                        const Text('Tidak ada kamera terdeteksi.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white54, fontSize: 13)),
                         const SizedBox(height: 16),
                         _ManualInput(),
                       ])
                     : Column(mainAxisSize: MainAxisSize.min, children: [
                         ..._devices.asMap().entries.map((e) => ListTile(
-                          leading: const Icon(Icons.camera_alt,
-                              color: Colors.cyanAccent),
+                          leading: const Icon(Icons.camera_alt, color: Colors.cyanAccent),
                           title: Text(e.value,
-                              style: const TextStyle(
-                                  color: Colors.white, fontSize: 13)),
-                          onTap: () =>
-                              Navigator.of(context).pop('/dev/video${e.key}'),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(6)),
+                              style: const TextStyle(color: Colors.white, fontSize: 13)),
+                          onTap: () => Navigator.of(context).pop('/dev/video${e.key}'),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
                           hoverColor: Colors.white10,
                         )),
                         const Divider(color: Colors.white12),
@@ -343,19 +354,15 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
                       ]),
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(null),
-          child: const Text('CANCEL',
-              style: TextStyle(color: Colors.white38)),
-        ),
+        TextButton(onPressed: () => Navigator.of(context).pop(null),
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white38))),
       ],
     );
   }
 }
 
 class _ManualInput extends StatefulWidget {
-  @override
-  State<_ManualInput> createState() => _ManualInputState();
+  @override State<_ManualInput> createState() => _ManualInputState();
 }
 
 class _ManualInputState extends State<_ManualInput> {
@@ -364,13 +371,10 @@ class _ManualInputState extends State<_ManualInput> {
   Widget build(BuildContext context) => Row(children: [
     Expanded(child: TextField(
       controller: _ctrl,
-      style: const TextStyle(
-          color: Colors.white, fontSize: 12, fontFamily: 'monospace'),
+      style: const TextStyle(color: Colors.white, fontSize: 12, fontFamily: 'monospace'),
       decoration: InputDecoration(
-        hintText: '/dev/video0',
-        hintStyle: const TextStyle(color: Colors.white30),
-        labelText: 'Path manual',
-        labelStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+        hintText: '/dev/video0', hintStyle: const TextStyle(color: Colors.white30),
+        labelText: 'Path manual', labelStyle: const TextStyle(color: Colors.white38, fontSize: 11),
         isDense: true,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(6),
             borderSide: const BorderSide(color: Colors.white24)),
@@ -381,35 +385,15 @@ class _ManualInputState extends State<_ManualInput> {
     const SizedBox(width: 8),
     ElevatedButton(
       onPressed: () => Navigator.of(context).pop(_ctrl.text.trim()),
-      style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.cyanAccent.withOpacity(0.2)),
+      style: ElevatedButton.styleFrom(backgroundColor: Colors.cyanAccent.withOpacity(0.2)),
       child: const Text('OPEN', style: TextStyle(fontSize: 11)),
     ),
   ]);
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  @override void dispose() { _ctrl.dispose(); super.dispose(); }
 }
 
 // ---------------------------------------------------------
-// 7. ORIGINAL IMAGE PAINTER
-// ---------------------------------------------------------
-class _OriginalImagePainter extends CustomPainter {
-  final ui.Image image;
-  _OriginalImagePainter({required this.image});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
-    final dst = Offset.zero & size;
-    canvas.drawImageRect(image, src, dst, Paint());
-  }
-
-  @override
-  bool shouldRepaint(_OriginalImagePainter old) => image != old.image;
-}
-
-// ---------------------------------------------------------
-// 8. MAIN UI
+// 9. MAIN HOME
 // ---------------------------------------------------------
 class MoilShaderHome extends StatefulWidget {
   const MoilShaderHome({super.key});
@@ -422,6 +406,7 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
   final EngineData _engineData = EngineData();
   final MoilConfig _moilConfig = MoilConfig();
   ViewMode _viewMode = ViewMode.processed;
+  int _activeView = 0;
 
   late final Player _player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
@@ -430,32 +415,25 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
   GstCameraController? _gstCamera;
   ui.Image? _cameraFrame;
   Ticker? _cameraTicker;
+  bool _isProcessing = false; // ✅ OPT: guard overlap
 
   ui.FragmentProgram? _program;
-  DateTime _lastTick = DateTime.now();
-
   VideoSource _currentSource = VideoSource.none;
   String? _activeSourceLabel;
   String? _cameraResolution;
 
+  static const _viewLabels = ['V1 · 0°', 'V2 · 90°', 'V3 · 180°', 'V4 · 270°'];
+
   @override
-  void initState() {
-    super.initState();
-    _loadShader();
-  }
+  void initState() { super.initState(); _loadShader(); }
 
   Future<void> _loadShader() async {
-    final program = await ui.FragmentProgram.fromAsset('shaders/anypoint.frag');
-    setState(() => _program = program);
+    final p = await ui.FragmentProgram.fromAsset('shaders/anypoint.frag');
+    setState(() => _program = p);
   }
 
-  void _toggleViewMode() {
-    setState(() {
-      _viewMode = _viewMode == ViewMode.processed
-          ? ViewMode.original
-          : ViewMode.processed;
-    });
-  }
+  void _toggleViewMode() => setState(() =>
+      _viewMode = _viewMode == ViewMode.processed ? ViewMode.original : ViewMode.processed);
 
   Future<void> _pickVideo() async {
     await _stopCamera();
@@ -466,79 +444,67 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
       await _player.setVolume(0);
       await _player.play();
       setState(() {
-        _currentSource     = VideoSource.file;
+        _currentSource = VideoSource.file;
         _activeSourceLabel = path.split('/').last;
-        _cameraResolution  = null;
+        _cameraResolution = null;
       });
     }
   }
 
   Future<void> _openCamera() async {
     final String? device = await showDialog<String>(
-      context: context,
-      builder: (_) => const CameraSelectDialog(),
-    );
+        context: context, builder: (_) => const CameraSelectDialog());
     if (device == null || device.isEmpty) return;
-
     await _player.stop();
 
-    // ✅ FIX: Gunakan 640x480 — resolusi yang terbukti bekerja di pipeline
-    //         Ganti ke 1920x1080 jika kamera dan pipeline sudah dikonfirmasi support
     final cam = GstCameraController(captureWidth: 1920, captureHeight: 1080);
-    final ok = await cam.open(device);
-
-    if (!ok) {
+    if (!await cam.open(device)) {
       if (!mounted) return;
+      cam.close();
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(
-          'GStreamer gagal membuka "$device".\n'
-          'Test manual: gst-launch-1.0 v4l2src device=$device '
-          '! image/jpeg,width=1920,height=1080 ! jpegdec ! videoconvert '
-          '! video/x-raw,format=RGBA ! fakesink',
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
-        ),
+        content: Text('GStreamer gagal membuka "$device".',
+            style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
         backgroundColor: Colors.redAccent,
-        duration: const Duration(seconds: 6),
+        duration: const Duration(seconds: 4),
         behavior: SnackBarBehavior.floating,
       ));
-      cam.close();
       return;
     }
 
     _gstCamera = cam;
 
-    // ✅ FIX: Update FPS dari kamera, bukan dari render loop
+    // ✅ OPT: _isProcessing guard mencegah tumpukan async
     _cameraTicker = createTicker((_) async {
-      if (_gstCamera == null) return;
-      final frame = await _gstCamera!.grabFrame();
-      if (frame != null && mounted) {
-        _cameraFrame?.dispose();
-        _engineData.updateFrame(
-          _gstCamera!.cameraFps,
-          _gstCamera!.cameraFrameMs,
-        );
-        setState(() => _cameraFrame = frame);
+      if (_isProcessing || _gstCamera == null) return;
+      _isProcessing = true;
+      try {
+        final frame = await _gstCamera!.grabFrame();
+        if (frame != null && mounted) {
+          _cameraFrame?.dispose();
+          _engineData.updateFrame(_gstCamera!.cameraFps, _gstCamera!.cameraFrameMs);
+          setState(() => _cameraFrame = frame);
+        }
+      } finally {
+        _isProcessing = false;
       }
     })..start();
 
     setState(() {
-      _currentSource     = VideoSource.camera;
+      _currentSource = VideoSource.camera;
       _activeSourceLabel = device;
-      _cameraResolution  = '640×480 GStreamer MJPEG';
+      _cameraResolution = '1920×1080 MJPEG';
     });
   }
 
   Future<void> _stopCamera() async {
-    _cameraTicker?.dispose();
-    _cameraTicker = null;
-    _gstCamera?.close();
-    _gstCamera = null;
-    _cameraFrame?.dispose();
-    _cameraFrame = null;
+    _cameraTicker?.dispose(); _cameraTicker = null;
+    _isProcessing = false;
+    _gstCamera?.close(); _gstCamera = null;
+    _cameraFrame?.dispose(); _cameraFrame = null;
     setState(() {
-      _currentSource     = VideoSource.none;
+      _currentSource = VideoSource.none;
       _activeSourceLabel = null;
-      _cameraResolution  = null;
+      _cameraResolution = null;
     });
   }
 
@@ -551,293 +517,317 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     super.dispose();
   }
 
-  void _handlePanUpdate(DragUpdateDetails d) {
-    double a = (_moilConfig.alpha + d.delta.dy * 0.3).clamp(-110.0, 110.0);
-    double b = _moilConfig.beta - d.delta.dx * 0.3;
+  void _handlePan(DragUpdateDetails d, int idx) {
+    double a = (_moilConfig.alphas[idx] + d.delta.dy * 0.3).clamp(-110.0, 110.0);
+    double b = _moilConfig.betas[idx] - d.delta.dx * 0.3;
     if (b >  180) b -= 360;
     if (b < -180) b += 360;
-    _moilConfig.updateControls(a, b, _moilConfig.zoom);
+    _moilConfig.updateView(idx, a, b, _moilConfig.zooms[idx]);
   }
 
-  void _paintOriginalImage(Canvas canvas, ui.Image image, Size size) {
-    final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
-    canvas.drawImageRect(image, src, Offset.zero & size, Paint());
+  void _handleScroll(PointerScrollEvent ev, int idx) {
+    final z = (_moilConfig.zooms[idx] + (ev.scrollDelta.dy > 0 ? -0.2 : 0.2))
+        .clamp(1.0, 12.0);
+    _moilConfig.updateView(idx, _moilConfig.alphas[idx], _moilConfig.betas[idx], z);
   }
 
-  Widget _buildShaderView(Size size) {
-    // ✅ FIX: Tampilkan loading state saat kamera terbuka tapi frame belum datang
-    if (_currentSource == VideoSource.camera && _cameraFrame == null) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Colors.cyanAccent),
-            SizedBox(height: 12),
-            Text('Waiting for camera frame...',
-                style: TextStyle(color: Colors.white54, fontSize: 12,
-                    fontFamily: 'monospace')),
-          ],
-        ),
-      );
-    }
-
-    if (_viewMode == ViewMode.original) {
-      if (_currentSource == VideoSource.camera && _cameraFrame != null) {
-        return CustomPaint(
-          painter: _OriginalImagePainter(image: _cameraFrame!),
-          size: Size.infinite,
-        );
-      } else if (_currentSource == VideoSource.file) {
-        return IgnorePointer(child: Video(controller: _videoController));
-      }
-    }
-
-    if (_currentSource == VideoSource.camera && _cameraFrame != null) {
-      return _GstShaderPainter(
-        image:   _cameraFrame!,
-        program: _program!,
-        config:  _moilConfig,
-        onFrame: (fps, ms) {}, // FPS sudah di-update dari ticker
-      );
-    }
-
-    // Mode video file
-    return UnconstrainedBox(
-      child: SizedBox(
-        width: size.width,
-        height: size.height,
-        child: AnimatedSampler(
-          (image, sz, canvas) {
-            final now = DateTime.now();
-            final dt  = now.difference(_lastTick).inMicroseconds / 1000000.0;
-            if (dt > 0) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _engineData.updateFrame(1.0 / dt, dt * 1000.0);
-              });
-            }
-            _lastTick = now;
-            if (_viewMode == ViewMode.processed) {
-              _applyShader(_program!.fragmentShader(), image, sz, canvas);
-            } else {
-              _paintOriginalImage(canvas, image, sz);
-            }
-          },
-          child: IgnorePointer(child: Video(controller: _videoController)),
-        ),
-      ),
-    );
-  }
-
-  void _applyShader(
-      ui.FragmentShader shader, ui.Image image, Size size, Canvas canvas) {
-    shader.setFloat(0,  _moilConfig.mode);
-    shader.setFloat(1,  size.width);
-    shader.setFloat(2,  size.height);
-    shader.setFloat(3,  _moilConfig.alpha);
-    shader.setFloat(4,  _moilConfig.beta);
-    shader.setFloat(5,  _moilConfig.zoom);
-    shader.setFloat(6,  _moilConfig.alphaMax);
-    shader.setFloat(7,  _moilConfig.imageWidth);
-    shader.setFloat(8,  _moilConfig.imageHeight);
-    shader.setFloat(9,  _moilConfig.iCx);
-    shader.setFloat(10, _moilConfig.iCy);
-    shader.setFloat(11, _moilConfig.calibrationRatio);
-    shader.setFloat(12, _moilConfig.p0);
-    shader.setFloat(13, _moilConfig.p1);
-    shader.setFloat(14, _moilConfig.p2);
-    shader.setFloat(15, _moilConfig.p3);
-    shader.setFloat(16, _moilConfig.p4);
-    shader.setFloat(17, _moilConfig.p5);
-    shader.setImageSampler(0, image);
-    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
-  }
-
+  // ── BUILD ────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(children: [
-        Column(children: [
-          Expanded(
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: 16 / 9,
-                child: _program != null
-                    ? AnimatedBuilder(
-                        animation: _moilConfig,
-                        builder: (ctx, _) => Listener(
-                          onPointerSignal: (ev) {
-                            if (ev is PointerScrollEvent) {
-                              final z = (_moilConfig.zoom +
-                                  (ev.scrollDelta.dy > 0 ? -0.2 : 0.2))
-                                  .clamp(1.0, 12.0);
-                              _moilConfig.updateControls(
-                                  _moilConfig.alpha, _moilConfig.beta, z);
-                            }
-                          },
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanUpdate: _handlePanUpdate,
-                            onDoubleTap: _moilConfig.reset,
-                            child: LayoutBuilder(builder: (_, constraints) {
-                              final availableSize = constraints.biggest;
-                              if (_currentSource == VideoSource.camera) {
-                                return _buildShaderView(availableSize);
-                              }
-                              return ClipRect(
-                                child: OverflowBox(
-                                  maxWidth: double.infinity,
-                                  maxHeight: double.infinity,
-                                  child: _buildShaderView(availableSize),
-                                ),
-                              );
-                            }),
-                          ),
-                        ),
-                      )
-                    : const CircularProgressIndicator(),
-              ),
-            ),
-          ),
-          _buildBottomConsole(),
-        ]),
-        _buildPerformanceOverlay(),
-        if (_activeSourceLabel != null) _buildSourceBadge(),
-        _buildViewModeButton(),
+      backgroundColor: const Color(0xFF080808),
+      body: Column(children: [
+        _buildTopBar(),
+        Expanded(child: _buildGrid()),
+        _buildBottomBar(),
       ]),
     );
   }
 
-  Widget _buildViewModeButton() {
-    return Positioned(
-      top: 40,
-      right: 220,
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.75),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: _viewMode == ViewMode.processed
-                ? Colors.cyanAccent.withOpacity(0.5)
-                : Colors.amber.withOpacity(0.5),
-          ),
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: _toggleViewMode,
-            borderRadius: BorderRadius.circular(8),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(
-                  _viewMode == ViewMode.processed
-                      ? Icons.auto_awesome : Icons.image,
-                  size: 14,
-                  color: _viewMode == ViewMode.processed
-                      ? Colors.cyanAccent : Colors.amber,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  _viewMode == ViewMode.processed ? 'SHADER' : 'ORIGINAL',
-                  style: TextStyle(
-                    color: _viewMode == ViewMode.processed
-                        ? Colors.cyanAccent : Colors.amber,
-                    fontSize: 10, fontFamily: 'monospace',
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ]),
+  // ── 4-VIEW GRID ──────────────────────────────────────
+  Widget _buildGrid() {
+    if (_program == null) {
+      return const Center(child: CircularProgressIndicator(color: Colors.cyanAccent));
+    }
+    return GridView.count(
+      crossAxisCount: 2,
+      crossAxisSpacing: 2,
+      mainAxisSpacing: 2,
+      padding: const EdgeInsets.all(2),
+      childAspectRatio: 16 / 9,
+      physics: const NeverScrollableScrollPhysics(),
+      children: List.generate(4, _buildCell),
+    );
+  }
+
+  Widget _buildCell(int idx) {
+    final isActive = _activeView == idx;
+    return GestureDetector(
+      onTap: () => setState(() => _activeView = idx),
+      onDoubleTap: () => _moilConfig.resetView(idx),
+      onPanUpdate: (d) => _handlePan(d, idx),
+      child: Listener(
+        onPointerSignal: (ev) {
+          if (ev is PointerScrollEvent) _handleScroll(ev, idx);
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: isActive ? Colors.cyanAccent : Colors.cyanAccent.withOpacity(0.15),
+              width: isActive ? 1.5 : 0.5,
             ),
           ),
+          child: Stack(children: [
+            // ── Content ──
+            _buildCellContent(idx),
+
+            // ── Per-view stats (kiri atas) ──
+            Positioned(
+              top: 4, left: 4,
+              child: ListenableBuilder(
+                listenable: _moilConfig,
+                builder: (_, __) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _miniLabel('α ${_moilConfig.alphas[idx].toStringAsFixed(1)}°'),
+                    _miniLabel('β ${_moilConfig.betas[idx].toStringAsFixed(1)}°'),
+                    _miniLabel('Z ${_moilConfig.zooms[idx].toStringAsFixed(1)}x'),
+                  ],
+                ),
+              ),
+            ),
+
+            // ── View label (kanan atas) ──
+            Positioned(
+              top: 4, right: 4,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isActive
+                      ? Colors.cyanAccent.withOpacity(0.2)
+                      : Colors.black.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(3),
+                  border: Border.all(
+                    color: isActive
+                        ? Colors.cyanAccent.withOpacity(0.7)
+                        : Colors.white12,
+                  ),
+                ),
+                child: Text(_viewLabels[idx], style: TextStyle(
+                  color: isActive ? Colors.cyanAccent : Colors.white38,
+                  fontSize: 8, fontFamily: 'monospace', fontWeight: FontWeight.bold,
+                )),
+              ),
+            ),
+          ]),
         ),
       ),
     );
   }
 
-  Widget _buildPerformanceOverlay() {
-    return Positioned(
-      top: 40, left: 20,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.7),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.cyanAccent.withOpacity(0.3)),
+  Widget _buildCellContent(int idx) {
+    // Loading
+    if (_currentSource == VideoSource.camera && _cameraFrame == null) {
+      return const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        CircularProgressIndicator(color: Colors.cyanAccent, strokeWidth: 2),
+        SizedBox(height: 6),
+        Text('Waiting for frame...', style: TextStyle(
+            color: Colors.white30, fontSize: 9, fontFamily: 'monospace')),
+      ]));
+    }
+
+    // Original view
+    if (_viewMode == ViewMode.original) {
+      if (_currentSource == VideoSource.camera && _cameraFrame != null) {
+        return CustomPaint(painter: _ImagePainter(image: _cameraFrame!), size: Size.infinite);
+      }
+      if (_currentSource == VideoSource.file) {
+        return IgnorePointer(child: Video(controller: _videoController));
+      }
+      return _noSource();
+    }
+
+    // Processed — kamera
+    if (_currentSource == VideoSource.camera && _cameraFrame != null) {
+      return AnimatedBuilder(
+        animation: _moilConfig,
+        builder: (_, __) => CustomPaint(
+          painter: _MoilPainter(
+            image: _cameraFrame!, program: _program!,
+            config: _moilConfig, viewIndex: idx,
+          ),
+          size: Size.infinite,
         ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _viewMode == ViewMode.processed
-                  ? Colors.cyanAccent.withOpacity(0.2)
-                  : Colors.amber.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: _viewMode == ViewMode.processed
-                    ? Colors.cyanAccent.withOpacity(0.5)
-                    : Colors.amber.withOpacity(0.5),
-              ),
-            ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(
-                _viewMode == ViewMode.processed
-                    ? Icons.auto_awesome : Icons.image,
-                size: 12,
-                color: _viewMode == ViewMode.processed
-                    ? Colors.cyanAccent : Colors.amber,
-              ),
-              const SizedBox(width: 4),
-              Text(
-                _viewMode == ViewMode.processed ? 'SHADER ACTIVE' : 'ORIGINAL VIEW',
-                style: TextStyle(
-                  color: _viewMode == ViewMode.processed
-                      ? Colors.cyanAccent : Colors.amber,
-                  fontSize: 9, fontWeight: FontWeight.bold,
+      );
+    }
+
+    // Processed — video file
+    // Catatan: 4 view pakai AnimatedSampler dari sumber yang sama,
+    // masing-masing dengan parameter beta berbeda
+    if (_currentSource == VideoSource.file) {
+      return AnimatedSampler(
+        (image, sz, canvas) => applyMoilShader(
+            _program!.fragmentShader(), image, sz, canvas, _moilConfig, idx),
+        child: IgnorePointer(child: Video(controller: _videoController)),
+      );
+    }
+
+    return _noSource();
+  }
+
+  Widget _noSource() => const Center(
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Icon(Icons.videocam_off, color: Colors.white12, size: 28),
+      SizedBox(height: 4),
+      Text('No source', style: TextStyle(color: Colors.white24, fontSize: 9, fontFamily: 'monospace')),
+    ]),
+  );
+
+  Widget _miniLabel(String text) => Container(
+    margin: const EdgeInsets.only(bottom: 1),
+    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+    decoration: BoxDecoration(
+      color: Colors.black54,
+      borderRadius: BorderRadius.circular(2),
+    ),
+    child: Text(text, style: const TextStyle(
+        color: Colors.white60, fontSize: 8, fontFamily: 'monospace')),
+  );
+
+  // ── TOP BAR ──────────────────────────────────────────
+  Widget _buildTopBar() {
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D0D0D),
+        border: Border(bottom: BorderSide(color: Colors.cyanAccent.withOpacity(0.2))),
+      ),
+      child: Row(children: [
+        const Icon(Icons.grid_view, color: Colors.cyanAccent, size: 14),
+        const SizedBox(width: 6),
+        const Text('MOIL 4-VIEW', style: TextStyle(
+          color: Colors.cyanAccent, fontSize: 12,
+          fontWeight: FontWeight.bold, fontFamily: 'monospace', letterSpacing: 2,
+        )),
+        const SizedBox(width: 16),
+
+        // FPS
+        ListenableBuilder(
+          listenable: _engineData,
+          builder: (_, __) => _badge(Icons.speed,
+              _currentSource == VideoSource.camera ? 'CAM FPS' : 'FPS',
+              '${_engineData.fps.toStringAsFixed(1)}', Colors.greenAccent),
+        ),
+        const SizedBox(width: 6),
+
+        // Frame time
+        ListenableBuilder(
+          listenable: _engineData,
+          builder: (_, __) => _badge(Icons.timer, 'FRAME',
+              '${_engineData.frameTimeMs.toStringAsFixed(1)}ms', Colors.tealAccent),
+        ),
+        const SizedBox(width: 6),
+
+        // Memory
+        ListenableBuilder(
+          listenable: _engineData,
+          builder: (_, __) => _badge(Icons.memory, 'MEM',
+              '${_engineData.memoryMB}MB', Colors.orangeAccent),
+        ),
+
+        if (_cameraResolution != null) ...[
+          const SizedBox(width: 6),
+          _badge(Icons.hd, 'RES', _cameraResolution!, Colors.blueAccent),
+        ],
+
+        const Spacer(),
+
+        // View selector buttons 1-4
+        ...List.generate(4, (i) => Padding(
+          padding: const EdgeInsets.only(left: 3),
+          child: GestureDetector(
+            onTap: () => setState(() => _activeView = i),
+            child: Container(
+              width: 26, height: 26,
+              decoration: BoxDecoration(
+                color: _activeView == i
+                    ? Colors.cyanAccent.withOpacity(0.2)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: _activeView == i ? Colors.cyanAccent : Colors.white24,
                 ),
               ),
-            ]),
-          ),
-          ListenableBuilder(
-            listenable: _engineData,
-            builder: (_, __) => Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ✅ Label CAMERA FPS jika source kamera
-                _perfRow(Icons.speed, 
-                    _currentSource == VideoSource.camera ? "CAM FPS" : "FPS",
-                    "${_engineData.fps.toStringAsFixed(1)}"),
-                _perfRow(Icons.timer,  "FRAME",
-                    "${_engineData.frameTimeMs.toStringAsFixed(2)} ms"),
-                _perfRow(Icons.memory, "MEM",
-                    "${_engineData.memoryMB} MB"),
-              ],
+              child: Center(child: Text('${i + 1}', style: TextStyle(
+                color: _activeView == i ? Colors.cyanAccent : Colors.white38,
+                fontSize: 10, fontWeight: FontWeight.bold, fontFamily: 'monospace',
+              ))),
             ),
           ),
-          const Divider(color: Colors.white24, height: 15),
-          ListenableBuilder(
-            listenable: _moilConfig,
-            builder: (_, __) => Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _perfRow(Icons.explore,     "ALPHA",
-                    "${_moilConfig.alpha.toStringAsFixed(2)}°"),
-                _perfRow(Icons.rotate_left, "BETA ",
-                    "${_moilConfig.beta.toStringAsFixed(2)}°"),
-                _perfRow(Icons.zoom_in,     "ZOOM ",
-                    "${_moilConfig.zoom.toStringAsFixed(2)}x"),
-              ],
-            ),
-          ),
-          if (_cameraResolution != null) ...[
-            const SizedBox(height: 4),
-            _perfRow(Icons.hd, "RES  ", _cameraResolution!),
-          ],
-          const SizedBox(height: 6),
-          const Text("GPU: SHADER ACTIVE", style: TextStyle(
-              color: Colors.orangeAccent,
-              fontSize: 9, fontWeight: FontWeight.bold)),
+        )),
+
+        const SizedBox(width: 10),
+
+        // Shader / Original toggle
+        _actionBtn(
+          _viewMode == ViewMode.processed ? Icons.auto_awesome : Icons.image,
+          _viewMode == ViewMode.processed ? 'SHADER' : 'ORIGINAL',
+          _viewMode == ViewMode.processed ? Colors.cyanAccent : Colors.amber,
+          _toggleViewMode,
+        ),
+        const SizedBox(width: 4),
+        _actionBtn(Icons.refresh, 'RESET', Colors.white54,
+            () => _moilConfig.resetView(_activeView)),
+        const SizedBox(width: 4),
+        _actionBtn(Icons.refresh_outlined, 'ALL', Colors.white38,
+            _moilConfig.resetAll),
+
+        // Source badge
+        if (_activeSourceLabel != null) ...[
+          const SizedBox(width: 10),
+          _buildSourceBadge(),
+        ],
+      ]),
+    );
+  }
+
+  Widget _badge(IconData icon, String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withOpacity(0.25)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 9, color: color),
+        const SizedBox(width: 3),
+        Text('$label: ', style: TextStyle(
+            color: color.withOpacity(0.6), fontSize: 8, fontFamily: 'monospace')),
+        Text(value, style: TextStyle(
+            color: color, fontSize: 9,
+            fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+      ]),
+    );
+  }
+
+  Widget _actionBtn(IconData icon, String label, Color color, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: color.withOpacity(0.25)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 3),
+          Text(label, style: TextStyle(color: color, fontSize: 8,
+              fontFamily: 'monospace', fontWeight: FontWeight.bold)),
         ]),
       ),
     );
@@ -845,103 +835,98 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
 
   Widget _buildSourceBadge() {
     final isCamera = _currentSource == VideoSource.camera;
-    return Positioned(
-      top: 40, right: 20,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.75),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: isCamera
-              ? Colors.greenAccent.withOpacity(0.5)
-              : Colors.blueAccent.withOpacity(0.5)),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (isCamera)
-            Padding(padding: const EdgeInsets.only(right: 6),
-                child: _LiveDot()),
-          Icon(isCamera ? Icons.videocam : Icons.movie,
-              size: 14,
-              color: isCamera ? Colors.greenAccent : Colors.blueAccent),
-          const SizedBox(width: 6),
-          Text(
-            isCamera ? 'LIVE: $_activeSourceLabel' : _activeSourceLabel!,
-            style: TextStyle(
-              color: isCamera ? Colors.greenAccent : Colors.blueAccent,
-              fontSize: 10, fontFamily: 'monospace',
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          if (isCamera) ...[
-            const SizedBox(width: 8),
-            GestureDetector(
-              onTap: _stopCamera,
-              child: const Icon(Icons.close, size: 14, color: Colors.white38),
-            ),
-          ],
-        ]),
+    final color = isCamera ? Colors.greenAccent : Colors.blueAccent;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withOpacity(0.35)),
       ),
-    );
-  }
-
-  Widget _perfRow(IconData icon, String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 14, color: Colors.cyanAccent),
-        const SizedBox(width: 8),
-        Text("$label:", style: const TextStyle(
-            color: Colors.white70, fontSize: 11, fontFamily: 'monospace')),
-        const SizedBox(width: 5),
-        Text(value, style: const TextStyle(
-            color: Colors.white, fontSize: 12,
-            fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+        if (isCamera) ...[_LiveDot(), const SizedBox(width: 4)],
+        Icon(isCamera ? Icons.videocam : Icons.movie, size: 10, color: color),
+        const SizedBox(width: 4),
+        Text(isCamera ? 'LIVE: $_activeSourceLabel' : _activeSourceLabel!,
+            style: TextStyle(color: color, fontSize: 8,
+                fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+        if (isCamera) ...[
+          const SizedBox(width: 6),
+          GestureDetector(onTap: _stopCamera,
+              child: const Icon(Icons.close, size: 10, color: Colors.white38)),
+        ],
       ]),
     );
   }
 
-  Widget _buildBottomConsole() {
+  // ── BOTTOM BAR ───────────────────────────────────────
+  Widget _buildBottomBar() {
     return Container(
-      padding: const EdgeInsets.all(20),
-      color: const Color(0xFF0D0D0D),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D0D0D),
+        border: Border(top: BorderSide(color: Colors.cyanAccent.withOpacity(0.2))),
+      ),
       child: Row(children: [
+        // Active view params display
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.cyanAccent.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.cyanAccent.withOpacity(0.2)),
+          ),
+          child: ListenableBuilder(
+            listenable: _moilConfig,
+            builder: (_, __) => Row(mainAxisSize: MainAxisSize.min, children: [
+              Text('V${_activeView + 1}  ',
+                  style: const TextStyle(color: Colors.cyanAccent,
+                      fontSize: 10, fontFamily: 'monospace', fontWeight: FontWeight.bold)),
+              Text(
+                'α=${_moilConfig.alphas[_activeView].toStringAsFixed(1)}°  '
+                'β=${_moilConfig.betas[_activeView].toStringAsFixed(1)}°  '
+                'Z=${_moilConfig.zooms[_activeView].toStringAsFixed(1)}x',
+                style: const TextStyle(color: Colors.white60,
+                    fontSize: 10, fontFamily: 'monospace'),
+              ),
+            ]),
+          ),
+        ),
+        const SizedBox(width: 10),
+
         Expanded(
           child: ElevatedButton.icon(
             onPressed: _pickVideo,
-            icon: const Icon(Icons.folder),
-            label: const Text("LOAD VIDEO SOURCE"),
+            icon: const Icon(Icons.folder, size: 15),
+            label: const Text('LOAD VIDEO', style: TextStyle(fontSize: 11)),
             style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.white10,
-                padding: const EdgeInsets.all(20)),
+                padding: const EdgeInsets.symmetric(vertical: 12)),
           ),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 8),
         Expanded(
           child: ElevatedButton.icon(
-            onPressed: _currentSource == VideoSource.camera
-                ? _stopCamera : _openCamera,
+            onPressed: _currentSource == VideoSource.camera ? _stopCamera : _openCamera,
             icon: Icon(_currentSource == VideoSource.camera
-                ? Icons.videocam_off : Icons.videocam),
+                ? Icons.videocam_off : Icons.videocam, size: 15),
             label: Text(_currentSource == VideoSource.camera
-                ? "DISCONNECT CAMERA" : "OPEN CAMERA"),
+                ? 'DISCONNECT' : 'OPEN CAMERA',
+                style: const TextStyle(fontSize: 11)),
             style: ElevatedButton.styleFrom(
               backgroundColor: _currentSource == VideoSource.camera
-                  ? Colors.redAccent.withOpacity(0.25)
-                  : Colors.greenAccent.withOpacity(0.15),
+                  ? Colors.redAccent.withOpacity(0.2)
+                  : Colors.greenAccent.withOpacity(0.1),
               foregroundColor: _currentSource == VideoSource.camera
                   ? Colors.redAccent : Colors.greenAccent,
-              side: BorderSide(color: _currentSource == VideoSource.camera
-                  ? Colors.redAccent.withOpacity(0.5)
-                  : Colors.greenAccent.withOpacity(0.4)),
-              padding: const EdgeInsets.all(20),
+              side: BorderSide(
+                color: _currentSource == VideoSource.camera
+                    ? Colors.redAccent.withOpacity(0.4)
+                    : Colors.greenAccent.withOpacity(0.3),
+              ),
+              padding: const EdgeInsets.symmetric(vertical: 12),
             ),
           ),
-        ),
-        const SizedBox(width: 10),
-        IconButton(
-          onPressed: _moilConfig.reset,
-          icon: const Icon(Icons.refresh),
-          color: Colors.cyanAccent,
         ),
       ]),
     );
@@ -949,108 +934,24 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
 }
 
 // ---------------------------------------------------------
-// 9. GST SHADER PAINTER
-// ---------------------------------------------------------
-class _GstShaderPainter extends StatefulWidget {
-  final ui.Image image;
-  final ui.FragmentProgram program;
-  final MoilConfig config;
-  final void Function(double fps, double ms) onFrame;
-
-  const _GstShaderPainter({
-    required this.image,
-    required this.program,
-    required this.config,
-    required this.onFrame,
-  });
-
-  @override
-  State<_GstShaderPainter> createState() => _GstShaderPainterState();
-}
-
-class _GstShaderPainterState extends State<_GstShaderPainter> {
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.config,
-      builder: (_, __) => CustomPaint(
-        painter: _MoilPainter(
-          image:   widget.image,
-          program: widget.program,
-          config:  widget.config,
-        ),
-        size: Size.infinite,
-      ),
-    );
-  }
-}
-
-class _MoilPainter extends CustomPainter {
-  final ui.Image image;
-  final ui.FragmentProgram program;
-  final MoilConfig config;
-
-  _MoilPainter({
-    required this.image,
-    required this.program,
-    required this.config,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final shader = program.fragmentShader();
-    shader.setFloat(0,  config.mode);
-    shader.setFloat(1,  size.width);
-    shader.setFloat(2,  size.height);
-    shader.setFloat(3,  config.alpha);
-    shader.setFloat(4,  config.beta);
-    shader.setFloat(5,  config.zoom);
-    shader.setFloat(6,  config.alphaMax);
-    shader.setFloat(7,  config.imageWidth);
-    shader.setFloat(8,  config.imageHeight);
-    shader.setFloat(9,  config.iCx);
-    shader.setFloat(10, config.iCy);
-    shader.setFloat(11, config.calibrationRatio);
-    shader.setFloat(12, config.p0);
-    shader.setFloat(13, config.p1);
-    shader.setFloat(14, config.p2);
-    shader.setFloat(15, config.p3);
-    shader.setFloat(16, config.p4);
-    shader.setFloat(17, config.p5);
-    shader.setImageSampler(0, image);
-    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
-  }
-
-  @override
-  bool shouldRepaint(_MoilPainter old) => image != old.image || config != old.config;
-}
-
-// ---------------------------------------------------------
-// 10. LIVE DOT INDICATOR
+// 10. LIVE DOT
 // ---------------------------------------------------------
 class _LiveDot extends StatefulWidget {
-  @override
-  State<_LiveDot> createState() => _LiveDotState();
+  @override State<_LiveDot> createState() => _LiveDotState();
 }
 
-class _LiveDotState extends State<_LiveDot>
-    with SingleTickerProviderStateMixin {
+class _LiveDotState extends State<_LiveDot> with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl = AnimationController(
     vsync: this, duration: const Duration(milliseconds: 800),
   )..repeat(reverse: true);
-  late final Animation<double> _anim =
-      Tween<double>(begin: 0.2, end: 1.0).animate(_ctrl);
+  late final Animation<double> _anim = Tween<double>(begin: 0.2, end: 1.0).animate(_ctrl);
 
   @override
   Widget build(BuildContext context) => FadeTransition(
-        opacity: _anim,
-        child: Container(
-          width: 7, height: 7,
-          decoration: const BoxDecoration(
-              color: Colors.redAccent, shape: BoxShape.circle),
-        ),
-      );
+    opacity: _anim,
+    child: Container(width: 6, height: 6,
+        decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle)),
+  );
 
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  @override void dispose() { _ctrl.dispose(); super.dispose(); }
 }
