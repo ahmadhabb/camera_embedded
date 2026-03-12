@@ -47,7 +47,7 @@ app.*.map.json
 
 # Native build artifacts
 /native/build/
-*.so
+# *.so
 *.a
 *.o
 *.d
