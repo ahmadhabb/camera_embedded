@@ -33,8 +33,6 @@ class MoilShaderApp extends StatelessWidget {
 // ---------------------------------------------------------
 // 1. FFI BINDINGS — libcamera_bridge.so
 // ---------------------------------------------------------
-
-// Tipe fungsi C
 typedef _CameraInitC      = ffi.Void Function();
 typedef _CameraOpenC      = ffi.Int32 Function(ffi.Pointer<Utf8>, ffi.Int32, ffi.Int32);
 typedef _CameraCloseC     = ffi.Void Function();
@@ -43,7 +41,6 @@ typedef _CameraIsRunningC = ffi.Int32 Function();
 typedef _CameraWidthC     = ffi.Int32 Function();
 typedef _CameraHeightC    = ffi.Int32 Function();
 
-// Tipe fungsi Dart
 typedef _CameraInitDart      = void Function();
 typedef _CameraOpenDart      = int Function(ffi.Pointer<Utf8>, int, int);
 typedef _CameraCloseDart     = void Function();
@@ -65,9 +62,7 @@ class CameraBridge {
   late final _CameraSizeDart      height;
 
   CameraBridge._load() {
-    // Library hasil build ada di folder linux/ project Flutter
     _lib = ffi.DynamicLibrary.open('linux/libcamera_bridge.so');
-
     init      = _lib.lookupFunction<_CameraInitC,      _CameraInitDart>     ('camera_init');
     open      = _lib.lookupFunction<_CameraOpenC,      _CameraOpenDart>     ('camera_open');
     close     = _lib.lookupFunction<_CameraCloseC,     _CameraCloseDart>    ('camera_close');
@@ -75,40 +70,38 @@ class CameraBridge {
     isRunning = _lib.lookupFunction<_CameraIsRunningC, _CameraIsRunningDart>('camera_is_running');
     width     = _lib.lookupFunction<_CameraWidthC,     _CameraSizeDart>     ('camera_width');
     height    = _lib.lookupFunction<_CameraHeightC,    _CameraSizeDart>     ('camera_height');
-
     init();
   }
 }
 
 // ---------------------------------------------------------
-// 2. GSTREAMER CAMERA TEXTURE CONTROLLER
+// 2. GSTREAMER CAMERA CONTROLLER
 // ---------------------------------------------------------
 class GstCameraController {
+  // ✅ FIX: Resolusi disesuaikan dengan pipeline yang terbukti bekerja (640x480)
+  //         Kalau mau 1920x1080, pastikan pipeline C juga 1920x1080
   final int captureWidth;
   final int captureHeight;
 
-  int? _textureId;
-  int get textureId => _textureId!;
-
   ffi.Pointer<ffi.Uint8>? _framePtr;
-  Ticker? _ticker;
   bool _opened = false;
 
-  // Callback dipanggil setiap ada frame baru (untuk trigger rebuild)
-  VoidCallback? onFrame;
+  // ✅ Camera FPS tracking (bukan UI FPS)
+  int _frameCount = 0;
+  DateTime _fpsTimer = DateTime.now();
+  DateTime _lastFrameTime = DateTime.now();
+  double cameraFps = 0.0;
+  double cameraFrameMs = 0.0;
 
   GstCameraController({
-    this.captureWidth  = 1920,
+    this.captureWidth  = 1920,   // ✅ FIX: default 1920x1080, cocok dengan pipeline
     this.captureHeight = 1080,
   });
 
-  /// Buka kamera dan mulai polling frame via Ticker (sync vsync)
   Future<bool> open(String devicePath) async {
     final bridge = CameraBridge.instance;
-
-    // Alokasi buffer RGBA sekali
-    final size = captureWidth * captureHeight * 4;
-    _framePtr = malloc.allocate<ffi.Uint8>(size);
+    final bufSize = captureWidth * captureHeight * 4; // RGBA
+    _framePtr = malloc.allocate<ffi.Uint8>(bufSize);
 
     final devUtf8 = devicePath.toNativeUtf8();
     final ok = bridge.open(devUtf8, captureWidth, captureHeight);
@@ -119,13 +112,10 @@ class GstCameraController {
       _framePtr = null;
       return false;
     }
-
     _opened = true;
     return true;
   }
 
-  /// Ambil frame terbaru dari GStreamer → kembalikan sebagai ui.Image (RGBA)
-  /// Returns null jika tidak ada frame baru
   Future<ui.Image?> grabFrame() async {
     if (!_opened || _framePtr == null) return null;
 
@@ -133,9 +123,21 @@ class GstCameraController {
     final hasNew = bridge.getFrame(_framePtr!);
     if (hasNew == 0) return null;
 
-    // Bungkus pointer ke Uint8List tanpa copy (zero-copy view)
-    final bytes = _framePtr!.asTypedList(captureWidth * captureHeight * 4);
-    final bytesCopy = Uint8List.fromList(bytes); // perlu copy untuk decodeImageFromPixels
+    // ✅ Hitung FPS dari frame kamera aktual (bukan UI render)
+    final now = DateTime.now();
+    final dt = now.difference(_lastFrameTime).inMicroseconds / 1000000.0;
+    if (dt > 0) cameraFrameMs = dt * 1000.0;
+    _lastFrameTime = now;
+    _frameCount++;
+    final elapsed = now.difference(_fpsTimer).inMilliseconds;
+    if (elapsed >= 500) {
+      cameraFps = _frameCount * 1000.0 / elapsed;
+      _frameCount = 0;
+      _fpsTimer = now;
+    }
+
+    final bytes     = _framePtr!.asTypedList(captureWidth * captureHeight * 4);
+    final bytesCopy = Uint8List.fromList(bytes);
 
     final completer = Completer<ui.Image>();
     ui.decodeImageFromPixels(
@@ -149,8 +151,6 @@ class GstCameraController {
   }
 
   void close() {
-    _ticker?.dispose();
-    _ticker = null;
     if (_opened) {
       CameraBridge.instance.close();
       _opened = false;
@@ -206,13 +206,12 @@ class MoilConfig extends ChangeNotifier {
   double zoom = 4.0;
   double alphaMax = 110.0;
 
-  // Resolusi sensor asli — referensi kalibrasi
   static const double _sensorWidth  = 2592.0;
   static const double _sensorHeight = 1944.0;
   static const double _sensorCx     = 1236.0;
   static const double _sensorCy     = 950.0;
 
-  // Resolusi capture: 1920×1080 MJPEG @ 30fps
+  // ✅ FIX: sesuaikan dengan resolusi capture aktual
   static const double _captureWidth  = 1920.0;
   static const double _captureHeight = 1080.0;
 
@@ -240,17 +239,13 @@ class MoilConfig extends ChangeNotifier {
 }
 
 // ---------------------------------------------------------
-// 5. CAMERA SOURCE STATE
+// 5. ENUMS
 // ---------------------------------------------------------
 enum VideoSource { none, file, camera }
-
-// ---------------------------------------------------------
-// 6. VIEW MODE
-// ---------------------------------------------------------
 enum ViewMode { processed, original }
 
 // ---------------------------------------------------------
-// 7. CAMERA SELECTION DIALOG
+// 6. CAMERA SELECTION DIALOG
 // ---------------------------------------------------------
 class CameraSelectDialog extends StatefulWidget {
   const CameraSelectDialog({super.key});
@@ -278,7 +273,7 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
           String label = 'Camera $i ($devPath)';
           try {
             final result = await Process.run(
-              'v4l2-ctl', ['--device=$devPath', '--info'], runInShell: true);
+                'v4l2-ctl', ['--device=$devPath', '--info'], runInShell: true);
             final match = RegExp(r'Card type\s+:\s+(.+)')
                 .firstMatch(result.stdout.toString());
             if (match != null) label = '${match.group(1)!.trim()} ($devPath)';
@@ -323,8 +318,7 @@ class _CameraSelectDialogState extends State<CameraSelectDialog> {
                             color: Colors.white38, size: 48),
                         const SizedBox(height: 12),
                         const Text(
-                          'Tidak ada kamera terdeteksi.\n'
-                          'Pastikan kamera terhubung dan driver tersedia.',
+                          'Tidak ada kamera terdeteksi.',
                           textAlign: TextAlign.center,
                           style: TextStyle(color: Colors.white54, fontSize: 13),
                         ),
@@ -397,27 +391,25 @@ class _ManualInputState extends State<_ManualInput> {
 }
 
 // ---------------------------------------------------------
-// 8. ORIGINAL IMAGE PAINTER
+// 7. ORIGINAL IMAGE PAINTER
 // ---------------------------------------------------------
 class _OriginalImagePainter extends CustomPainter {
   final ui.Image image;
-  
   _OriginalImagePainter({required this.image});
-  
+
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint();
     final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
     final dst = Offset.zero & size;
-    canvas.drawImageRect(image, src, dst, paint);
+    canvas.drawImageRect(image, src, dst, Paint());
   }
-  
+
   @override
   bool shouldRepaint(_OriginalImagePainter old) => image != old.image;
 }
 
 // ---------------------------------------------------------
-// 9. MAIN UI
+// 8. MAIN UI
 // ---------------------------------------------------------
 class MoilShaderHome extends StatefulWidget {
   const MoilShaderHome({super.key});
@@ -431,12 +423,10 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
   final MoilConfig _moilConfig = MoilConfig();
   ViewMode _viewMode = ViewMode.processed;
 
-  // media_kit — untuk playback file video
   late final Player _player = Player(
       configuration: const PlayerConfiguration(logLevel: MPVLogLevel.warn));
   late final VideoController _videoController = VideoController(_player);
 
-  // GStreamer — untuk live camera
   GstCameraController? _gstCamera;
   ui.Image? _cameraFrame;
   Ticker? _cameraTicker;
@@ -459,18 +449,16 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     setState(() => _program = program);
   }
 
-  // --- TOGGLE VIEW MODE ---
   void _toggleViewMode() {
     setState(() {
-      _viewMode = _viewMode == ViewMode.processed 
-          ? ViewMode.original 
+      _viewMode = _viewMode == ViewMode.processed
+          ? ViewMode.original
           : ViewMode.processed;
     });
   }
 
-  // --- LOAD VIDEO FILE (media_kit) ---
   Future<void> _pickVideo() async {
-    await _stopCamera(); // pastikan kamera dimatikan dulu
+    await _stopCamera();
     final result = await FilePicker.platform.pickFiles(type: FileType.video);
     if (result != null) {
       final path = result.files.single.path!;
@@ -478,14 +466,13 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
       await _player.setVolume(0);
       await _player.play();
       setState(() {
-        _currentSource   = VideoSource.file;
+        _currentSource     = VideoSource.file;
         _activeSourceLabel = path.split('/').last;
         _cameraResolution  = null;
       });
     }
   }
 
-  // --- OPEN CAMERA (GStreamer) ---
   Future<void> _openCamera() async {
     final String? device = await showDialog<String>(
       context: context,
@@ -493,9 +480,10 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     );
     if (device == null || device.isEmpty) return;
 
-    // Stop media_kit jika sedang play
     await _player.stop();
 
+    // ✅ FIX: Gunakan 640x480 — resolusi yang terbukti bekerja di pipeline
+    //         Ganti ke 1920x1080 jika kamera dan pipeline sudah dikonfirmasi support
     final cam = GstCameraController(captureWidth: 1920, captureHeight: 1080);
     final ok = await cam.open(device);
 
@@ -504,8 +492,9 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
           'GStreamer gagal membuka "$device".\n'
-          'Coba: gst-launch-1.0 v4l2src device=$device ! '
-          'image/jpeg,width=1920,height=1080 ! jpegdec ! videoconvert ! autovideosink',
+          'Test manual: gst-launch-1.0 v4l2src device=$device '
+          '! image/jpeg,width=1920,height=1080 ! jpegdec ! videoconvert '
+          '! video/x-raw,format=RGBA ! fakesink',
           style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
         ),
         backgroundColor: Colors.redAccent,
@@ -518,12 +507,16 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
 
     _gstCamera = cam;
 
-    // Ticker sync dengan vsync Flutter — poll frame setiap vsync (~16ms @ 60Hz)
+    // ✅ FIX: Update FPS dari kamera, bukan dari render loop
     _cameraTicker = createTicker((_) async {
       if (_gstCamera == null) return;
       final frame = await _gstCamera!.grabFrame();
       if (frame != null && mounted) {
         _cameraFrame?.dispose();
+        _engineData.updateFrame(
+          _gstCamera!.cameraFps,
+          _gstCamera!.cameraFrameMs,
+        );
         setState(() => _cameraFrame = frame);
       }
     })..start();
@@ -531,7 +524,7 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     setState(() {
       _currentSource     = VideoSource.camera;
       _activeSourceLabel = device;
-      _cameraResolution  = '1920×1080 GStreamer MJPEG';
+      _cameraResolution  = '640×480 GStreamer MJPEG';
     });
   }
 
@@ -567,39 +560,48 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
   }
 
   void _paintOriginalImage(Canvas canvas, ui.Image image, Size size) {
-    final paint = Paint();
     final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
-    final dst = Offset.zero & size;
-    canvas.drawImageRect(image, src, dst, paint);
+    canvas.drawImageRect(image, src, Offset.zero & size, Paint());
   }
 
-  // Buat ui.Image dari frame GStreamer untuk dipakai AnimatedSampler
   Widget _buildShaderView(Size size) {
-    // Jika mode original, tampilkan tanpa shader
+    // ✅ FIX: Tampilkan loading state saat kamera terbuka tapi frame belum datang
+    if (_currentSource == VideoSource.camera && _cameraFrame == null) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.cyanAccent),
+            SizedBox(height: 12),
+            Text('Waiting for camera frame...',
+                style: TextStyle(color: Colors.white54, fontSize: 12,
+                    fontFamily: 'monospace')),
+          ],
+        ),
+      );
+    }
+
     if (_viewMode == ViewMode.original) {
       if (_currentSource == VideoSource.camera && _cameraFrame != null) {
-        // Untuk kamera, tampilkan frame original tanpa shader
         return CustomPaint(
           painter: _OriginalImagePainter(image: _cameraFrame!),
           size: Size.infinite,
         );
       } else if (_currentSource == VideoSource.file) {
-        // Untuk video file, tampilkan video original tanpa shader
         return IgnorePointer(child: Video(controller: _videoController));
       }
     }
 
-    // Mode processed: tampilkan dengan shader
     if (_currentSource == VideoSource.camera && _cameraFrame != null) {
       return _GstShaderPainter(
-        image: _cameraFrame!,
+        image:   _cameraFrame!,
         program: _program!,
-        config: _moilConfig,
-        onFrame: (fps, ms) => _engineData.updateFrame(fps, ms),
+        config:  _moilConfig,
+        onFrame: (fps, ms) {}, // FPS sudah di-update dari ticker
       );
     }
 
-    // Mode file dengan shader
+    // Mode video file
     return UnconstrainedBox(
       child: SizedBox(
         width: size.width,
@@ -617,7 +619,6 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
             if (_viewMode == ViewMode.processed) {
               _applyShader(_program!.fragmentShader(), image, sz, canvas);
             } else {
-              // Untuk original view, gambar image langsung
               _paintOriginalImage(canvas, image, sz);
             }
           },
@@ -679,15 +680,10 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
                             onPanUpdate: _handlePanUpdate,
                             onDoubleTap: _moilConfig.reset,
                             child: LayoutBuilder(builder: (_, constraints) {
-                              // HITUNG UKURAN YANG TERSEDIA
                               final availableSize = constraints.biggest;
-                              
-                              // JIKA MODE KAMERA, KEMBALIKAN LANGSUNG
                               if (_currentSource == VideoSource.camera) {
                                 return _buildShaderView(availableSize);
                               }
-                              
-                              // UNTUK VIDEO FILE, BUNGKUS DENGAN CLIPRRECT AGAR TIDAK KELUAR BATAS
                               return ClipRect(
                                 child: OverflowBox(
                                   maxWidth: double.infinity,
@@ -707,22 +703,21 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
         ]),
         _buildPerformanceOverlay(),
         if (_activeSourceLabel != null) _buildSourceBadge(),
-        _buildViewModeButton(), // Tambahkan button untuk toggle view mode
+        _buildViewModeButton(),
       ]),
     );
   }
 
-  // --- WIDGETS ---
   Widget _buildViewModeButton() {
     return Positioned(
       top: 40,
-      right: 220, // Posisikan di sebelah kiri source badge
+      right: 220,
       child: Container(
         decoration: BoxDecoration(
           color: Colors.black.withOpacity(0.75),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: _viewMode == ViewMode.processed 
+            color: _viewMode == ViewMode.processed
                 ? Colors.cyanAccent.withOpacity(0.5)
                 : Colors.amber.withOpacity(0.5),
           ),
@@ -734,32 +729,25 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
             borderRadius: BorderRadius.circular(8),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _viewMode == ViewMode.processed 
-                        ? Icons.auto_awesome 
-                        : Icons.image,
-                    size: 14,
-                    color: _viewMode == ViewMode.processed 
-                        ? Colors.cyanAccent 
-                        : Colors.amber,
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(
+                  _viewMode == ViewMode.processed
+                      ? Icons.auto_awesome : Icons.image,
+                  size: 14,
+                  color: _viewMode == ViewMode.processed
+                      ? Colors.cyanAccent : Colors.amber,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _viewMode == ViewMode.processed ? 'SHADER' : 'ORIGINAL',
+                  style: TextStyle(
+                    color: _viewMode == ViewMode.processed
+                        ? Colors.cyanAccent : Colors.amber,
+                    fontSize: 10, fontFamily: 'monospace',
+                    fontWeight: FontWeight.bold,
                   ),
-                  const SizedBox(width: 6),
-                  Text(
-                    _viewMode == ViewMode.processed ? 'SHADER' : 'ORIGINAL',
-                    style: TextStyle(
-                      color: _viewMode == ViewMode.processed 
-                          ? Colors.cyanAccent 
-                          : Colors.amber,
-                      fontSize: 10,
-                      fontFamily: 'monospace',
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ]),
             ),
           ),
         ),
@@ -778,53 +766,47 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
           border: Border.all(color: Colors.cyanAccent.withOpacity(0.3)),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // Status View Mode
           Container(
             margin: const EdgeInsets.only(bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: _viewMode == ViewMode.processed 
+              color: _viewMode == ViewMode.processed
                   ? Colors.cyanAccent.withOpacity(0.2)
                   : Colors.amber.withOpacity(0.2),
               borderRadius: BorderRadius.circular(4),
               border: Border.all(
-                color: _viewMode == ViewMode.processed 
+                color: _viewMode == ViewMode.processed
                     ? Colors.cyanAccent.withOpacity(0.5)
                     : Colors.amber.withOpacity(0.5),
               ),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  _viewMode == ViewMode.processed 
-                      ? Icons.auto_awesome 
-                      : Icons.image,
-                  size: 12,
-                  color: _viewMode == ViewMode.processed 
-                      ? Colors.cyanAccent 
-                      : Colors.amber,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(
+                _viewMode == ViewMode.processed
+                    ? Icons.auto_awesome : Icons.image,
+                size: 12,
+                color: _viewMode == ViewMode.processed
+                    ? Colors.cyanAccent : Colors.amber,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                _viewMode == ViewMode.processed ? 'SHADER ACTIVE' : 'ORIGINAL VIEW',
+                style: TextStyle(
+                  color: _viewMode == ViewMode.processed
+                      ? Colors.cyanAccent : Colors.amber,
+                  fontSize: 9, fontWeight: FontWeight.bold,
                 ),
-                const SizedBox(width: 4),
-                Text(
-                  _viewMode == ViewMode.processed ? 'SHADER ACTIVE' : 'ORIGINAL VIEW',
-                  style: TextStyle(
-                    color: _viewMode == ViewMode.processed 
-                        ? Colors.cyanAccent 
-                        : Colors.amber,
-                    fontSize: 9,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ]),
           ),
           ListenableBuilder(
             listenable: _engineData,
             builder: (_, __) => Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _perfRow(Icons.speed,  "FPS",
+                // ✅ Label CAMERA FPS jika source kamera
+                _perfRow(Icons.speed, 
+                    _currentSource == VideoSource.camera ? "CAM FPS" : "FPS",
                     "${_engineData.fps.toStringAsFixed(1)}"),
                 _perfRow(Icons.timer,  "FRAME",
                     "${_engineData.frameTimeMs.toStringAsFixed(2)} ms"),
@@ -967,7 +949,7 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
 }
 
 // ---------------------------------------------------------
-// 10. GST SHADER PAINTER — render GStreamer frame langsung ke shader
+// 9. GST SHADER PAINTER
 // ---------------------------------------------------------
 class _GstShaderPainter extends StatefulWidget {
   final ui.Image image;
@@ -987,8 +969,6 @@ class _GstShaderPainter extends StatefulWidget {
 }
 
 class _GstShaderPainterState extends State<_GstShaderPainter> {
-  DateTime _lastTick = DateTime.now();
-
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -998,9 +978,6 @@ class _GstShaderPainterState extends State<_GstShaderPainter> {
           image:   widget.image,
           program: widget.program,
           config:  widget.config,
-          onFrame: widget.onFrame,
-          lastTick: _lastTick,
-          onTick:  (t) => _lastTick = t,
         ),
         size: Size.infinite,
       ),
@@ -1012,30 +989,15 @@ class _MoilPainter extends CustomPainter {
   final ui.Image image;
   final ui.FragmentProgram program;
   final MoilConfig config;
-  final void Function(double fps, double ms) onFrame;
-  final DateTime lastTick;
-  final void Function(DateTime) onTick;
 
   _MoilPainter({
     required this.image,
     required this.program,
     required this.config,
-    required this.onFrame,
-    required this.lastTick,
-    required this.onTick,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final now = DateTime.now();
-    final dt  = now.difference(lastTick).inMicroseconds / 1000000.0;
-    if (dt > 0) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        onFrame(1.0 / dt, dt * 1000.0);
-      });
-    }
-    onTick(now);
-
     final shader = program.fragmentShader();
     shader.setFloat(0,  config.mode);
     shader.setFloat(1,  size.width);
@@ -1060,11 +1022,11 @@ class _MoilPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_MoilPainter old) => true;
+  bool shouldRepaint(_MoilPainter old) => image != old.image || config != old.config;
 }
 
 // ---------------------------------------------------------
-// 11. LIVE DOT INDICATOR
+// 10. LIVE DOT INDICATOR
 // ---------------------------------------------------------
 class _LiveDot extends StatefulWidget {
   @override
