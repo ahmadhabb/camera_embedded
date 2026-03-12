@@ -82,12 +82,12 @@ int camera_open(const char* devicePath, int width, int height) {
     // v4l2src → MJPEG caps filter → jpegdec → videoconvert → RGBA → appsink
     gchar* desc = g_strdup_printf(
         "v4l2src device=%s ! "
-        "image/jpeg,width=%d,height=%d,framerate=30/1 ! "
+        "image/jpeg,width=640,height=480,framerate=30/1 ! "
         "jpegdec ! "
         "videoconvert ! "
-        "video/x-raw,format=RGBA,width=%d,height=%d ! "
+        "video/x-raw,format=BGR! "
         "appsink name=sink emit-signals=true sync=false max-buffers=1 drop=true",
-        devicePath, width, height, width, height
+        devicePath
     );
 
     GError* err = nullptr;

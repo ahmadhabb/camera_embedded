@@ -245,7 +245,12 @@ class MoilConfig extends ChangeNotifier {
 enum VideoSource { none, file, camera }
 
 // ---------------------------------------------------------
-// 6. CAMERA SELECTION DIALOG
+// 6. VIEW MODE
+// ---------------------------------------------------------
+enum ViewMode { processed, original }
+
+// ---------------------------------------------------------
+// 7. CAMERA SELECTION DIALOG
 // ---------------------------------------------------------
 class CameraSelectDialog extends StatefulWidget {
   const CameraSelectDialog({super.key});
@@ -392,7 +397,27 @@ class _ManualInputState extends State<_ManualInput> {
 }
 
 // ---------------------------------------------------------
-// 7. MAIN UI
+// 8. ORIGINAL IMAGE PAINTER
+// ---------------------------------------------------------
+class _OriginalImagePainter extends CustomPainter {
+  final ui.Image image;
+  
+  _OriginalImagePainter({required this.image});
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint();
+    final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+    final dst = Offset.zero & size;
+    canvas.drawImageRect(image, src, dst, paint);
+  }
+  
+  @override
+  bool shouldRepaint(_OriginalImagePainter old) => image != old.image;
+}
+
+// ---------------------------------------------------------
+// 9. MAIN UI
 // ---------------------------------------------------------
 class MoilShaderHome extends StatefulWidget {
   const MoilShaderHome({super.key});
@@ -404,6 +429,7 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     with SingleTickerProviderStateMixin {
   final EngineData _engineData = EngineData();
   final MoilConfig _moilConfig = MoilConfig();
+  ViewMode _viewMode = ViewMode.processed;
 
   // media_kit — untuk playback file video
   late final Player _player = Player(
@@ -431,6 +457,15 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
   Future<void> _loadShader() async {
     final program = await ui.FragmentProgram.fromAsset('shaders/anypoint.frag');
     setState(() => _program = program);
+  }
+
+  // --- TOGGLE VIEW MODE ---
+  void _toggleViewMode() {
+    setState(() {
+      _viewMode = _viewMode == ViewMode.processed 
+          ? ViewMode.original 
+          : ViewMode.processed;
+    });
   }
 
   // --- LOAD VIDEO FILE (media_kit) ---
@@ -531,32 +566,64 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
     _moilConfig.updateControls(a, b, _moilConfig.zoom);
   }
 
+  void _paintOriginalImage(Canvas canvas, ui.Image image, Size size) {
+    final paint = Paint();
+    final src = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+    final dst = Offset.zero & size;
+    canvas.drawImageRect(image, src, dst, paint);
+  }
+
   // Buat ui.Image dari frame GStreamer untuk dipakai AnimatedSampler
   Widget _buildShaderView(Size size) {
-    // Mode kamera: gunakan CustomPaint dengan frame langsung
+    // Jika mode original, tampilkan tanpa shader
+    if (_viewMode == ViewMode.original) {
+      if (_currentSource == VideoSource.camera && _cameraFrame != null) {
+        // Untuk kamera, tampilkan frame original tanpa shader
+        return CustomPaint(
+          painter: _OriginalImagePainter(image: _cameraFrame!),
+          size: Size.infinite,
+        );
+      } else if (_currentSource == VideoSource.file) {
+        // Untuk video file, tampilkan video original tanpa shader
+        return IgnorePointer(child: Video(controller: _videoController));
+      }
+    }
+
+    // Mode processed: tampilkan dengan shader
     if (_currentSource == VideoSource.camera && _cameraFrame != null) {
       return _GstShaderPainter(
-        image:   _cameraFrame!,
+        image: _cameraFrame!,
         program: _program!,
-        config:  _moilConfig,
+        config: _moilConfig,
         onFrame: (fps, ms) => _engineData.updateFrame(fps, ms),
       );
     }
 
-    // Mode file: gunakan AnimatedSampler (media_kit → Flutter texture)
-    return AnimatedSampler(
-      (image, sz, canvas) {
-        final now = DateTime.now();
-        final dt  = now.difference(_lastTick).inMicroseconds / 1000000.0;
-        if (dt > 0) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) _engineData.updateFrame(1.0 / dt, dt * 1000.0);
-          });
-        }
-        _lastTick = now;
-        _applyShader(_program!.fragmentShader(), image, sz, canvas);
-      },
-      child: IgnorePointer(child: Video(controller: _videoController)),
+    // Mode file dengan shader
+    return UnconstrainedBox(
+      child: SizedBox(
+        width: size.width,
+        height: size.height,
+        child: AnimatedSampler(
+          (image, sz, canvas) {
+            final now = DateTime.now();
+            final dt  = now.difference(_lastTick).inMicroseconds / 1000000.0;
+            if (dt > 0) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) _engineData.updateFrame(1.0 / dt, dt * 1000.0);
+              });
+            }
+            _lastTick = now;
+            if (_viewMode == ViewMode.processed) {
+              _applyShader(_program!.fragmentShader(), image, sz, canvas);
+            } else {
+              // Untuk original view, gambar image langsung
+              _paintOriginalImage(canvas, image, sz);
+            }
+          },
+          child: IgnorePointer(child: Video(controller: _videoController)),
+        ),
+      ),
     );
   }
 
@@ -611,8 +678,24 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
                             behavior: HitTestBehavior.opaque,
                             onPanUpdate: _handlePanUpdate,
                             onDoubleTap: _moilConfig.reset,
-                            child: LayoutBuilder(builder: (_, constraints) =>
-                                _buildShaderView(constraints.biggest)),
+                            child: LayoutBuilder(builder: (_, constraints) {
+                              // HITUNG UKURAN YANG TERSEDIA
+                              final availableSize = constraints.biggest;
+                              
+                              // JIKA MODE KAMERA, KEMBALIKAN LANGSUNG
+                              if (_currentSource == VideoSource.camera) {
+                                return _buildShaderView(availableSize);
+                              }
+                              
+                              // UNTUK VIDEO FILE, BUNGKUS DENGAN CLIPRRECT AGAR TIDAK KELUAR BATAS
+                              return ClipRect(
+                                child: OverflowBox(
+                                  maxWidth: double.infinity,
+                                  maxHeight: double.infinity,
+                                  child: _buildShaderView(availableSize),
+                                ),
+                              );
+                            }),
                           ),
                         ),
                       )
@@ -624,11 +707,65 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
         ]),
         _buildPerformanceOverlay(),
         if (_activeSourceLabel != null) _buildSourceBadge(),
+        _buildViewModeButton(), // Tambahkan button untuk toggle view mode
       ]),
     );
   }
 
   // --- WIDGETS ---
+  Widget _buildViewModeButton() {
+    return Positioned(
+      top: 40,
+      right: 220, // Posisikan di sebelah kiri source badge
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.75),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: _viewMode == ViewMode.processed 
+                ? Colors.cyanAccent.withOpacity(0.5)
+                : Colors.amber.withOpacity(0.5),
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: _toggleViewMode,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _viewMode == ViewMode.processed 
+                        ? Icons.auto_awesome 
+                        : Icons.image,
+                    size: 14,
+                    color: _viewMode == ViewMode.processed 
+                        ? Colors.cyanAccent 
+                        : Colors.amber,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _viewMode == ViewMode.processed ? 'SHADER' : 'ORIGINAL',
+                    style: TextStyle(
+                      color: _viewMode == ViewMode.processed 
+                          ? Colors.cyanAccent 
+                          : Colors.amber,
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _buildPerformanceOverlay() {
     return Positioned(
@@ -641,6 +778,47 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
           border: Border.all(color: Colors.cyanAccent.withOpacity(0.3)),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Status View Mode
+          Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: _viewMode == ViewMode.processed 
+                  ? Colors.cyanAccent.withOpacity(0.2)
+                  : Colors.amber.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                color: _viewMode == ViewMode.processed 
+                    ? Colors.cyanAccent.withOpacity(0.5)
+                    : Colors.amber.withOpacity(0.5),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _viewMode == ViewMode.processed 
+                      ? Icons.auto_awesome 
+                      : Icons.image,
+                  size: 12,
+                  color: _viewMode == ViewMode.processed 
+                      ? Colors.cyanAccent 
+                      : Colors.amber,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  _viewMode == ViewMode.processed ? 'SHADER ACTIVE' : 'ORIGINAL VIEW',
+                  style: TextStyle(
+                    color: _viewMode == ViewMode.processed 
+                        ? Colors.cyanAccent 
+                        : Colors.amber,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
           ListenableBuilder(
             listenable: _engineData,
             builder: (_, __) => Column(
@@ -789,7 +967,7 @@ class _MoilShaderHomeState extends State<MoilShaderHome>
 }
 
 // ---------------------------------------------------------
-// 8. GST SHADER PAINTER — render GStreamer frame langsung ke shader
+// 10. GST SHADER PAINTER — render GStreamer frame langsung ke shader
 // ---------------------------------------------------------
 class _GstShaderPainter extends StatefulWidget {
   final ui.Image image;
@@ -886,7 +1064,7 @@ class _MoilPainter extends CustomPainter {
 }
 
 // ---------------------------------------------------------
-// 9. LIVE DOT INDICATOR
+// 11. LIVE DOT INDICATOR
 // ---------------------------------------------------------
 class _LiveDot extends StatefulWidget {
   @override
